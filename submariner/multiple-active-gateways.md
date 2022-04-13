@@ -49,12 +49,15 @@ The proposal for supporting multiple active gateway nodes is shown in the follow
 #### Load balancing options
 
 Multiple options for load balancing exist.
+
 * Option 1: The one currently supported by vishvananda/netlink, and implemented in the POC, is to include multiple next
   hops in each route using the "nexthop" option.
+
 * Option 2: A more efficient option is to use nexthop groups.  They are more efficient because multiple routes can use the same
   nexthop group, and when the nexthop group changes, you only need to update the group object and not all of the routes
   that use it. A good discussion can be found
   [here](https://lpc.events/event/4/contributions/434/attachments/251/436/nexthop-objects-talk.pdf).
+
 * Option 3: Resilient nexthop groups are an even better option because they reduce the churn that happens when flows hash to new
   links after a nexthop group changes. A good overview of resilient nexthop groups can be found
   [here](https://docs.kernel.org/networking/nexthop-group-resilient.html).
@@ -72,19 +75,19 @@ An example packet flow with Globalnet disabled, is shown in the following diagra
 
 ![MultiGatewayFlowNonGN](./images/multi-gateway-flow-non-globalnet.png)
 
-1. Traffic leaves pod destined for Imported Service (100.2.0.132) and is sent to one of the gateways (**GW-2** here) over
-the intra-cluster VxLAN Tunnel via a multipath route on the worker node:
+1. Traffic leaves pod destined for Imported Service (100.2.0.132) and is sent to one of the gateways (**GW-2** here)
+   over the intra-cluster VxLAN Tunnel via a multipath route on the worker node:
 
-2. ```shell
+    ```shell
     Routing Table Default: 100.2.0.0/16 proto static
                   nexthop via 240.18.0.6 dev vx-submariner weight 1
                   nexthop via 240.18.0.8 dev vx-submariner weight 1
     ```
 
-    <p align="right"> SRC: 10.1.128.4  DST: 100.2.0.132 </p>
+    > SRC: 10.1.128.4  DST: 100.2.0.132
 
-3. Traffic reaches local GW node (**GW-2**) and is routed towards one of the remote gateways (**GW-3** or **GW-4**) over
-the inter-cluster VxLAN Tunnel via a multipath route on the gateway node:
+2. Traffic reaches local GW node (**GW-2**) and is routed towards one of the remote gateways (**GW-3** or **GW-4**)
+   over the inter-cluster VxLAN Tunnel via a multipath route on the gateway node:
 
     ```shell
     Routing Table 100: 100.2.0.0/16 src 10.0.0.1 metric 100 pervasive
@@ -92,78 +95,87 @@ the inter-cluster VxLAN Tunnel via a multipath route on the gateway node:
                        nexthop via 241.18.0.9 dev vxlan-tunnel weight 1
     ```
 
-    <p align="right"> SRC: 10.1.128.4  DST: 100.2.0.132 </p>
+    > SRC: 10.1.128.4  DST: 100.2.0.132
 
-4. Traffic reaches remote GW node (**GW-4**):
+3. Traffic reaches remote GW node (**GW-4**):
 
-   a. DstIP of the packet is the Cluster IP of the exported k8s service, so the traffic is DNAT’ed by the CNI to a backend Pod IP:
+    a. DstIP of the packet is the Cluster IP of the exported k8s service, so the traffic is DNAT’ed by the CNI
+       to a backend Pod IP:
 
     ```shell
     -A KUBE-SEP-WWP6UFXXL5K3PY6D -p tcp -m comment --comment "default/submariner-lpq6zr4tl4o5qvrv2t7o3l3gawkagast" -m tcp -j DNAT --to-destination 10.0.128.5:80
     ```
 
-    <p align="right"> SRC: 10.1.128.4  DST: 10.0.128.5 </p>
+    > SRC: 10.1.128.4  DST: 10.0.128.5
 
-   b. If the pod isn’t on the GW node (**GW-4**), the return packets need to flow back through this node because the
-connection tracking state for step 3-a only exists on this node. To do this, the traffic is SNAT’ed to the IP address of
-the Node’s main CNI interface so that traffic returns via the same gateway. For this setup the Weave CNI is used so service
-DNAT is handled by kubeproxy. NOTE: The packet should only be SNAT'ed if the state is DNAT (from step 3-a). This is because
-we don't want a similar SNAT to occur in step 6. The IPtables rule looks something like:
+    b. If the pod isn’t on the GW node (**GW-4**), the return packets need to flow back through this node because
+       the connection tracking state for step 3-a only exists on this node. To do this, the traffic is SNAT’ed to the
+       IP address of the Node’s main CNI interface so that traffic returns via the same gateway. For this setup the
+       Weave CNI is used so service DNAT is handled by kubeproxy. NOTE: The packet should only be SNAT'ed if the
+       state is DNAT (from step 3-a). This is because we don't want a similar SNAT to occur in step 6. The IPtables
+       rule looks something like:
 
-   ```shell
+    ```shell
     -A SUBMARINER-POSTROUTING -i vxlan-tunnel -o weave -m conntrack --ctstate DNAT -j SNAT --to-source 10.2.192.0
     ```
 
-    <p align="right"> SRC: 10.2.192.0  DST: 10.0.128.5 </p>
+    > SRC: 10.2.192.0  DST: 10.0.128.5
 
-   c. Routed to the Dst node by the CNI.
-    <p align="right"> SRC: 10.2.192.0  DST: 10.0.128.5 </p>
+    c. Routed to the Dst node by the CNI.
 
-5. Traffic is delivered to the destination pod via the CNI, and sent back to the correct local GW node (**GW-4**) via the
-CNI due to the SNAT completed in step 3-b.
-    <p align="right"> SRC: 10.0.128.5  DST: 10.2.192.0 </p>
+    > SRC: 10.2.192.0  DST: 10.0.128.5
 
-6. Traffic arrives back at the same GW node (**GW-4**) it entered on:
+4. Traffic is delivered to the destination pod via the CNI, and sent back to the correct local GW node (**GW-4**)
+   via the CNI due to the SNAT completed in step 3-b.
 
-   a. Traffic is DNAT'ed (reverse the SNAT in 3-b) back to original pod IP.
-    <p align="right"> SRC: 10.0.128.5 DST: 10.1.128.4 </p>
+    > SRC: 10.0.128.5  DST: 10.2.192.0
 
-   b. Traffic is SNAT'ed (reverse the DNAT in 3-a) back to the Cluster IP of the k8s service.
-    <p align="right"> SRC: 100.2.0.132  DST: 10.1.128.4 </p>
+5. Traffic arrives back at the same GW node (**GW-4**) it entered on:
 
-   c. Traffic is routed towards one of the remote gateways (**GW-1** or **GW-2**). Since there is no NAT on the originating
-side and the originating gateway is unknown, the return packets may be sent to either gateway via the following multipath route.
+    a. Traffic is DNAT'ed (reverse the SNAT in 3-b) back to original pod IP.
 
-   ```shell
+    > SRC: 10.0.128.5 DST: 10.1.128.4
+
+    b. Traffic is SNAT'ed (reverse the DNAT in 3-a) back to the Cluster IP of the k8s service.
+
+    > SRC: 100.2.0.132  DST: 10.1.128.4
+
+    c. Traffic is routed towards one of the remote gateways (**GW-1** or **GW-2**). Since there is no NAT on the
+       originating side and the originating gateway is unknown, the return packets may be sent to either gateway
+       via the following multipath route.
+
+    ```shell
     Routing Table 100: 10.1.0.0/16 src 10.1.128.0 metric 100 pervasive
                        nexthop via 241.18.0.6 dev vxlan-tunnel weight 1
                        nexthop via 241.18.0.8 dev vxlan-tunnel weight 1
     ```
 
-    <p align="right"> SRC: 100.2.0.132  DST: 10.1.128.4 </p>
+    > SRC: 100.2.0.132  DST: 10.1.128.4
 
-7. Traffic is received on the inter-cluster VxLAN Tunnel on either **GW-1** or **GW-2**.
+6. Traffic is received on the inter-cluster VxLAN Tunnel on either **GW-1** or **GW-2**.
 
-   a. The traffic is accepted and forwarded to the original originating pod.
-    <p align="right"> SRC: 100.2.0.132  DST: 10.1.128.4 </p>
+    a. The traffic is accepted and forwarded to the original originating pod.
 
-   b. The following rule includes `-m conntrack --ctstate DNAT` so that the SNAT step described in 3-b is skipped for
-response packets.
+    > SRC: 100.2.0.132  DST: 10.1.128.4
 
-   ```shell
+    b. The following rule includes `-m conntrack --ctstate DNAT` so that the SNAT step described in 3-b is skipped
+       for response packets.
+
+    ```shell
     SKIPPED:  -A SUBMARINER-POSTROUTING -i vxlan-tunnel -o weave -m conntrack --ctstate DNAT -j SNAT --to-source 10.1.128.0
     ```
 
-   NOTE: Weave performs connection tracking on flows and only allows responses to TCP sessions with state.  The state for
-the given flow exists on **GW-2**, but not on **GW-1**. Because of this, it is necessary to add the following rule to allow
-the response packets through if they happen to be returned to a gateway other than the one that the outbound flow uses:
+    NOTE: Weave performs connection tracking on flows and only allows responses to TCP sessions with state.  The
+    state for the given flow exists on **GW-2**, but not on **GW-1**. Because of this, it is necessary to add the
+    following rule to allow the response packets through if they happen to be returned to a gateway other than the
+    one that the outbound flow uses:
 
-   ```shell
+    ```shell
     -A FORWARD -d 10.1.0.0/16 -i vxlan-tunnel -j ACCEPT
     ```
 
-   An alternative approach is to SNAT packets using egress IPs in a way similar to what is done for Globalnet with
-clusterglobalegressIPs so that the return packets can be routed back to the same gateway.
+    An alternative approach is to SNAT packets using egress IPs in a way similar to what is done for Globalnet with
+    clusterglobalegressIPs so that the return packets can be routed back to the same gateway.
 
 ### Multiple Active Gateway Packet Flow with Globalnet
 
@@ -172,7 +184,7 @@ An example packet flow with Globalnet enabled, is shown in the following diagram
 ![MultiGatewayFlowGN](./images/multi-gateway-flow-globalnet.png)
 
 1. Traffic leaves pod destined for Imported service (242.254.2.254) and is sent to one of the gateways (**GW-2** here)
-over the intra-cluster VxLAN Tunnel via a multipath route on the worker node:
+   over the intra-cluster VxLAN Tunnel via a multipath route on the worker node:
 
    ```shell
     Routing Table Default: 242.254.2.0/24 proto static
@@ -180,79 +192,84 @@ over the intra-cluster VxLAN Tunnel via a multipath route on the worker node:
                   nexthop via 240.18.0.8 dev vx-submariner weight 1
     ```
 
-    <p align="right"> SRC: 10.1.128.4  DST: 242.254.2.254 </p>
+    > SRC: 10.1.128.4  DST: 242.254.2.254
 
 2. Traffic reaches local GW node (**GW-2**):
 
-   a. SNAT’ed to a `clusterglobalEgressIP` from **GW-2** via IPtables:
+    a. SNAT’ed to a `clusterglobalEgressIP` from **GW-2** via IPtables:
 
-   ```shell
+    ```shell
     -A SM-GN-EGRESS-CLUSTER -s 10.0.0.0/16 -m mark --mark 0xc0000/0xc0000 -j SNAT --to-source 242.254.1.1-242.254.1.8
     ```
 
-    <p align="right"> SRC: 242.254.1.1  DST: 242.254.2.254 </p>
+    > SRC: 242.254.1.1  DST: 242.254.2.254
 
-   b. Routed towards one of the remote gateways (**GW-3** or **GW-4**) over the inter-cluster VxLAN Tunnel via a multipath
-route on the gateway node:
+    b. Routed towards one of the remote gateways (**GW-3** or **GW-4**) over the inter-cluster VxLAN Tunnel via a
+       multipath route on the gateway node:
 
-   ```shell
+    ```shell
     Routing Table 100: 242.254.2.0/24 src 10.0.0.1 metric 100 pervasive
                        nexthop via 241.18.0.4 dev vxlan-tunnel weight 1
                        nexthop via 241.18.0.9 dev vxlan-tunnel weight 1
     ```
 
-    <p align="right"> SRC: 242.254.1.1  DST: 242.254.2.254 </p>
+    > SRC: 242.254.1.1  DST: 242.254.2.254
 
 3. Traffic reaches remote GW node (**GW-4**):
 
-   a. DstIP of the packet is the external IP of the k8s service mirrored by submariner, so the traffic is DNAT’ed by the
-CNI to a backend Pod IP:
+    a. DstIP of the packet is the external IP of the k8s service mirrored by submariner, so the traffic is DNAT’ed
+       by the CNI to a backend Pod IP:
 
-   ```shell
+    ```shell
     -A KUBE-SEP-WWP6UFXXL5K3PY6D -p tcp -m comment --comment "default/submariner-lpq6zr4tl4o5qvrv2t7o3l3gawkagast" -m tcp -j DNAT --to-destination 10.0.128.5:80
     ```
 
-    <p align="right"> SRC: 242.254.1.1  DST: 10.0.128.5 </p>
+    > SRC: 242.254.1.1  DST: 10.0.128.5
 
-   b. If the pod isn’t on the GW node (**GW-4**), the return packets need to flow back through this node because the connection
-tracking state for step 3-a only exists on this node. To do this, the traffic is SNAT’ed to the IP address of the Node’s main
-CNI interface so that traffic returns via the same gateway. For this setup the Weave CNI is used so service DNAT is handled by
-kubeproxy. The IPtables rule looks something like:
+    b. If the pod isn’t on the GW node (**GW-4**), the return packets need to flow back through this node because
+       the connection tracking state for step 3-a only exists on this node. To do this, the traffic is SNAT’ed to
+       the IP address of the Node’s main CNI interface so that traffic returns via the same gateway. For this setup
+       the Weave CNI is used so service DNAT is handled by kubeproxy. The IPtables rule looks something like:
 
-   ```shell
+    ```shell
     A SUBMARINER-POSTROUTING -i vxlan-tunnel -o weave -m conntrack --ctstate DNAT -j SNAT --to-source 10.2.192.0
     ```
 
-    <p align="right"> SRC: 10.2.192.0  DST: 10.0.128.5 </p>
+    > SRC: 10.2.192.0  DST: 10.0.128.5
 
-   c. Routed to the Dst node by the CNI.
-    <p align="right"> SRC: 10.2.192.0  DST: 10.0.128.5 </p>
+    c. Routed to the Dst node by the CNI.
 
-4. Traffic is delivered to the destination pod via the CNI, and sent back to the correct local GW node (**GW-4**) via the
-CNI due to the SNAT completed in step 3-b.
-    <p align="right"> SRC: 10.0.128.5  DST: 10.2.192.0 </p>
+    > SRC: 10.2.192.0  DST: 10.0.128.5
+
+4. Traffic is delivered to the destination pod via the CNI, and sent back to the correct local GW node (**GW-4**)
+   via the CNI due to the SNAT completed in step 3-b.
+
+    > SRC: 10.0.128.5  DST: 10.2.192.0
 
 5. Traffic arrives back at the same GW node (**GW-4**) it entered on:
 
-   a. Traffic is DNAT'ed (reverse the SNAT in 3-b) back to one of the Original GW node’s `clusterglobalEgressIP`.
-    <p align="right"> SRC: 10.0.128.5 DST: 242.254.1.1 </p>
+    a. Traffic is DNAT'ed (reverse the SNAT in 3-b) back to one of the Original GW node’s `clusterglobalEgressIP`.
 
-   b. Traffic is SNAT'ed (reverse the DNAT in 3-a) back to external IP of the k8s service mirrored by submariner.
-    <p align="right"> SRC: 242.254.2.254  DST: 242.254.1.1 </p>
+    > SRC: 10.0.128.5 DST: 242.254.1.1
 
-   c. Routed back to the Original gateway using specific routes have been added for ClusterGlobalEgressIPs that take
-precedence over the multipath routes that are used for the larger Globalnet CIDR.
+    b. Traffic is SNAT'ed (reverse the DNAT in 3-a) back to external IP of the k8s service mirrored by submariner.
 
-   ```shell
+    > SRC: 242.254.2.254  DST: 242.254.1.1
+
+    c. Routed back to the Original gateway using specific routes have been added for ClusterGlobalEgressIPs that
+       take precedence over the multipath routes that are used for the larger Globalnet CIDR.
+
+    ```shell
     Routing Table 100:   242.254.1.10 via 241.18.0.8 dev vxlan-tunnel metric 98
                          …
                          242.254.1.16 via 241.18.0.8 dev vxlan-tunnel metric 98
     ```
 
-    <p align="right"> SRC: 242.254.2.254  DST: 242.254.1.1 </p>
+    > SRC: 242.254.2.254  DST: 242.254.1.1
 
 6. Traffic is DNAT’ed back to the original pod IP and sent back via the CNI.
-    <p align="right"> SRC: 242.254.2.254  DST: 10.1.128.4 </p>
+
+    > SRC: 242.254.2.254  DST: 10.1.128.4
 
 ## Data Model Changes
 
@@ -260,36 +277,38 @@ precedence over the multipath routes that are used for the larger Globalnet CIDR
 
 Multiple Active Gateways is an optional feature that can be enabled when a cluster is joined to the broker.
 The user can indicate whether they wish the feature to be enabled or not using a new flag added to the
-subctl join` command.
+`subctl join` command.
 
-<pre>
-subctl join … <b>--multi-active-gateway=true</b>
-</pre>
+```shell
+subctl join … --multi-active-gateway=true
+```
 
 The flag will be processed by the `subctl join` command and used to populate a new field in the existing
 `submariners` CRD object and used to store and disseminate the flag to the rest of the code. If not entered,
 the new MultiActiveGatewayEnabled flag will default to false.
 
-<pre>
+```Go
 // SubmarinerSpec defines the desired state of Submariner
 // +k8s:openapi-gen=true
 type SubmarinerSpec struct {
     Broker string `json:"broker"`
     :
-    <b>MultiActiveGatewayEnabled bool `json:"multiActiveGatewayEnabled,omitempty"`</b>
+    MultiActiveGatewayEnabled bool `json:"multiActiveGatewayEnabled,omitempty"`
     :
 }
-</pre>
+```
 
 The flag will need to be passed to the `submariner-gateway` and `submariner-globalnet` pods when they are
 started. Within each pod, the flag will be propagated to multiple controllers.
 
 ### Non-Globalnet
+
 No data-model changes specific to the non-Globalnet deployment.
 
 ### Globalnet
 
 #### Globalnet ClusterGlobalEgressIps Instancing
+
 Currently, there is one instance of the `clusterglobalegressips` CRD object per cluster. This object is a set of
 globally unique IP Addresses (across all clusters managed by Submariner) one of which is used on the Gateway node
 as the IP Address to SNAT the source address on egress packets. Currently, the one instance of the
@@ -385,16 +404,16 @@ The Submariner Endpoint CRD Object is currently already shared across clusters. 
 to the existing `submariners` CRD object and used to store and disseminate the IP Addresses to the remote
 clusters.
 
-<pre>
+```Go
 type EndpointSpec struct {
     // +kubebuilder:validation:MaxLength=63
     // +kubebuilder:validation:MinLength=1
     ClusterID string `json:"cluster_id"`
     :
-    <b>// The list of allocated ClusterGlobaEgresslIPs.</b>
-    <b>AllocatedIPs  []string          `json:"allocated_ips,omitempty"`</b>
+    // The list of allocated ClusterGlobaEgresslIPs.
+    AllocatedIPs  []string          `json:"allocated_ips,omitempty"`
 }
-</pre>
+```
 
 The advantage of using Submariner Endpoint is that it is already shared across clusters and instanced properly
 for sharing the desired data.
@@ -411,7 +430,7 @@ to the node name described in [Globalnet ClusterGlobalEgressIps Instancing](#glo
 The `ClusterID` also needs to be included in the CRD Object. *(TBD - Node name as well?)*
 
 
-<pre>
+```Go
 type ClusterGlobalEgressIP struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -430,7 +449,7 @@ type ClusterGlobalEgressIPSpec struct {
     // If not specified, defaults to 1.
     // +kubebuilder:validation:Minimum=0
     // +kubebuilder:validation:Maximum=20
-    <b>ClusterID string `json:"cluster_id"`</b>
+    ClusterID string `json:"cluster_id"`
     // +optional
     NumberOfIPs *int `json:"numGlobalIPs,omitempty"`
 }
@@ -443,7 +462,7 @@ type GlobalEgressIPStatus struct {
     // +optional
     AllocatedIPs []string `json:"allocatedIPs,omitempty"`
 }
-</pre>
+```
 
 ## Standard Deployment Dataplane Changes
 
